@@ -34,7 +34,8 @@ shift
 # ── Debug mode ────────────────────────────────────────────────────────────────
 # Usage:  ./deploy.sh <file.pgn.zst> --debug [N]
 #   Imports only the first N games (default 1,000,000) then stops.
-#   Skips the slow post-load index build so you get a fast schema/pipeline check.
+#   Runs the full post-load pipeline including all index builds — use this to
+#   validate the complete deploy on a small dataset before a full import.
 #   Uses a separate database (lichess_debug) so it never pollutes a real import.
 #   Re-drops and recreates the debug DB on each run for a clean slate.
 #
@@ -105,8 +106,11 @@ build_index() {
     local name="$1" sql="$2"
     _idx_check "$name" || return 0
 
-    # Launch the build in a background psql process
-    psql "$DSN" -c "$sql" >/dev/null 2>&1 &
+    # Launch the build in a background psql process; capture stderr for
+    # display on failure — otherwise a bad column name gives "exit 1" with
+    # no context.
+    local errfile; errfile=$(mktemp)
+    psql "$DSN" -c "$sql" >/dev/null 2>"$errfile" &
     local pid=$! start=$SECONDS stuck_at=0
 
     printf "  ◌ %-50s " "$name"
@@ -162,8 +166,11 @@ build_index() {
     wait "$pid"; local rc=$? elapsed=$(( SECONDS - start ))
     if [[ $rc -eq 0 ]]; then
         printf "\r  ✓ %-50s [████████████████████] done\033[K  %ds\n" "$name" "$elapsed"
+        rm -f "$errfile"
     else
         printf "\r  ✗ %-50s FAILED (exit %d)\033[K\n" "$name" "$rc"
+        [[ -s "$errfile" ]] && echo "    Error output:" && sed 's/^/    /' "$errfile"
+        rm -f "$errfile"
         die "Index build failed: $name"
     fi
 }
@@ -184,7 +191,8 @@ _cluster_monitored() {
     fi
 
     printf "  ◌ CLUSTER %-42s " "$tbl"
-    psql "$DSN" -c "CLUSTER $tbl USING $idx" >/dev/null 2>&1 &
+    local errfile; errfile=$(mktemp)
+    psql "$DSN" -c "CLUSTER $tbl USING $idx" >/dev/null 2>"$errfile" &
     local pid=$! start=$SECONDS
     while kill -0 "$pid" 2>/dev/null; do
         local row phase blks_done blks_total
@@ -205,8 +213,11 @@ _cluster_monitored() {
     wait "$pid"; local rc=$? elapsed=$(( SECONDS - start ))
     if [[ $rc -eq 0 ]]; then
         printf "\r  ✓ CLUSTER %-42s done\033[K  %ds\n" "$tbl" "$elapsed"
+        rm -f "$errfile"
     else
         printf "\r  ✗ CLUSTER %-42s FAILED\033[K\n" "$tbl"
+        [[ -s "$errfile" ]] && echo "    Error output:" && sed 's/^/    /' "$errfile"
+        rm -f "$errfile"
         die "CLUSTER failed on $tbl"
     fi
 }
