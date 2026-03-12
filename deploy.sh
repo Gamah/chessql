@@ -201,7 +201,11 @@ pg_run -f "$DIR/lichess_schema_fast.sql"
 
 PARSERS=$(( NCPU - 2 < 1 ? 1 : NCPU - 2 ))
 FILE_SIZE=$(stat -c%s "$PGN_FILE" 2>/dev/null || echo 0)
-TARGET_GAMES=$(( FILE_SIZE / 322 ))
+if [[ $DEBUG -eq 1 ]]; then
+    TARGET_GAMES=$DEBUG_LIMIT
+else
+    TARGET_GAMES=$(( FILE_SIZE / 322 ))
+fi
 
 # Always clear checkpoint when DB is empty — it may be baked into a VM snapshot
 DB_GAME_COUNT=$(psql "$DSN" -At -c "SELECT COUNT(*) FROM games" 2>/dev/null || echo 0)
@@ -303,12 +307,8 @@ echo "  Import complete."
 # Idempotent: all statements use IF NOT EXISTS or CONCURRENTLY (which is a no-op
 # if the index already exists). Safe to re-run after a partial failure.
 
-if [[ $DEBUG -eq 1 ]]; then
-    log "DEBUG MODE — skipping post_load.sql index builds"
-else
-    log "Running post_load.sql (index builds — may take 30-60 min)"
-    pg_run -f "$DIR/post_load.sql"
-fi
+log "Running post_load.sql (index builds — may take 30-60 min)"
+pg_run -f "$DIR/post_load.sql"
 
 # ── 8. Restore safe Postgres settings ────────────────────────────────────────
 
