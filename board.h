@@ -22,6 +22,19 @@ inline bool is_pawn  (Piece p) { return p == wP || p == bP; }
 inline bool is_rook  (Piece p) { return p == wR || p == bR; }
 inline bool is_king  (Piece p) { return p == wK || p == bK; }
 
+// Maps any piece to its type letter (colour-agnostic).
+inline char piece_to_char(Piece p) {
+    switch (p) {
+        case wP: case bP: return 'P';
+        case wN: case bN: return 'N';
+        case wB: case bB: return 'B';
+        case wR: case bR: return 'R';
+        case wQ: case bQ: return 'Q';
+        case wK: case bK: return 'K';
+        default:          return '?';
+    }
+}
+
 inline Piece color_piece(bool white, int type) {
     return white ? (Piece)type : (Piece)(type + 6);
 }
@@ -183,6 +196,57 @@ struct Board {
         sq[from] = EMPTY;
         white_to_move = !white;
         return true;
+    }
+
+    // Packs both sides' non-king piece counts into a BIGINT.
+    // Each count occupies 4 bits (nibble), allowing values 0-15.
+    // Kings are excluded — they are always present and never captured.
+    //
+    // Bit layout (one nibble per piece type, 10 nibbles = 40 bits total):
+    //
+    //   bits  0- 3  white pawns    (wP >> 0)  & 0xF
+    //   bits  4- 7  white knights  (wN >> 4)  & 0xF
+    //   bits  8-11  white bishops  (wB >> 8)  & 0xF
+    //   bits 12-15  white rooks    (wR >> 12) & 0xF
+    //   bits 16-19  white queens   (wQ >> 16) & 0xF
+    //   bits 20-23  black pawns    (bP >> 20) & 0xF
+    //   bits 24-27  black knights  (bN >> 24) & 0xF
+    //   bits 28-31  black bishops  (bB >> 28) & 0xF
+    //   bits 32-35  black rooks    (bR >> 32) & 0xF
+    //   bits 36-39  black queens   (bQ >> 36) & 0xF
+    //
+    // Starting position value:
+    //   wP=8<<0 | wN=2<<4 | wB=2<<8 | wR=2<<12 | wQ=1<<16
+    //   bP=8<<20| bN=2<<24| bB=2<<28| bR=2<<32 | bQ=1<<36
+    //   = 0x0000_1222_8_1222_8  (little-endian nibble view)
+    //
+    // Example SQL extractions:
+    //   white queens:  (material >> 16) & 15
+    //   black knights: (material >> 24) & 15
+    //   white pawns:    material        & 15
+    int64_t material_packed() const {
+        int wP=0, wN=0, wB=0, wR=0, wQ=0;
+        int bP=0, bN=0, bB=0, bR=0, bQ=0;
+        for (int s = 0; s < 64; s++) {
+            switch (sq[s]) {
+                case ::wP: wP++; break; case ::wN: wN++; break;
+                case ::wB: wB++; break; case ::wR: wR++; break;
+                case ::wQ: wQ++; break;
+                case ::bP: bP++; break; case ::bN: bN++; break;
+                case ::bB: bB++; break; case ::bR: bR++; break;
+                case ::bQ: bQ++; break;
+                default: break;
+            }
+        }
+        // Verify shift offsets match the bit layout documented above:
+        //   wP@ 0, wN@ 4, wB@ 8, wR@12, wQ@16,
+        //   bP@20, bN@24, bB@28, bR@32, bQ@36
+        return  (int64_t)wP
+            | ((int64_t)wN <<  4) | ((int64_t)wB <<  8)
+            | ((int64_t)wR << 12) | ((int64_t)wQ << 16)
+            | ((int64_t)bP << 20) | ((int64_t)bN << 24)
+            | ((int64_t)bB << 28) | ((int64_t)bR << 32)
+            | ((int64_t)bQ << 36);
     }
 
     // SAN → UCI conversion.

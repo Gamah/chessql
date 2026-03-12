@@ -15,6 +15,8 @@ struct MoveRow {
     std::optional<int> clock_secs;
     std::optional<int> eval_cp;
     std::optional<int> eval_mate;
+    char    piece_moved = '?'; // P N B R Q K  — piece that moved (pawn for promotions)
+    int64_t material    = 0;   // both sides packed as nibbles; see Board::material_packed()
 };
 
 struct GameRow {
@@ -202,10 +204,14 @@ inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) 
 
         if (uci.empty()) { g.parse_error = true; break; }
 
+        char    piece_moved = piece_to_char(board.sq[parse_sq(uci[0], uci[1])]);
+        int64_t mat         = board.material_packed();
+
         auto [eval_cp, eval_mate] = extract_eval(tc.comment);
         auto clock = extract_clock(tc.comment);
 
-        g.moves.push_back({ply, uci, hash_before, clock, eval_cp, eval_mate});
+        g.moves.push_back({ply, uci, hash_before, clock, eval_cp, eval_mate,
+                           piece_moved, mat});
 
         if (!board.apply_uci(uci)) { g.parse_error = true; break; }
     }

@@ -727,6 +727,10 @@ static void writer_thread(const std::string& dsn,
                 row += "\t";
                 if (m.eval_mate) row += std::to_string(*m.eval_mate);
                 else row += "\\N";
+                row += "\t";
+                row += m.piece_moved;
+                row += "\t";
+                row += std::to_string(m.material);
                 row += "\n";
                 move_rows.push_back(std::move(row));
                 move_count++;
@@ -736,7 +740,7 @@ static void writer_thread(const std::string& dsn,
         if (!move_rows.empty()) {
             copy_rows(conn,
                 "COPY game_moves(game_id,ply,move_id,position_hash,"
-                "clock_secs,eval_cp,eval_mate) FROM STDIN",
+                "clock_secs,eval_cp,eval_mate,piece_moved,material) FROM STDIN",
                 move_rows);
         }
 
