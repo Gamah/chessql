@@ -3,7 +3,6 @@
 # deploy.sh — Full Lichess import on fresh Ubuntu 24.04
 #
 # Place ALL these files in the same directory:
-#   db.pgn.zst
 #   lichess_schema_fast.sql
 #   post_load.sql
 #   lichess_import.cpp  zobrist.cpp
@@ -11,7 +10,7 @@
 #   Makefile
 #
 # Run as a non-root user with sudo:
-#   chmod +x deploy.sh && ./deploy.sh
+#   chmod +x deploy.sh && ./deploy.sh <file.pgn.zst>
 #
 # Re-runnable: safe to run again after a crash.
 #   - Packages: apt is idempotent
@@ -24,8 +23,16 @@
 
 set -euo pipefail
 
+usage() { echo "Usage: $0 <file.pgn.zst> [--debug [N]]" >&2; exit 1; }
+
+# ── Positional argument: PGN file ────────────────────────────────────────────
+[[ $# -lt 1 || "${1:-}" == --* ]] && usage
+PGN_FILE="$(realpath "$1")"
+[[ -f "$PGN_FILE" ]] || { echo "✗ File not found: $PGN_FILE" >&2; exit 1; }
+shift
+
 # ── Debug mode ────────────────────────────────────────────────────────────────
-# Usage:  ./deploy.sh --debug [N]
+# Usage:  ./deploy.sh <file.pgn.zst> --debug [N]
 #   Imports only the first N games (default 1,000,000) then stops.
 #   Skips the slow post-load index build so you get a fast schema/pipeline check.
 #   Uses a separate database (lichess_debug) so it never pollutes a real import.
@@ -193,7 +200,7 @@ pg_run -f "$DIR/lichess_schema_fast.sql"
 # ── 6. Import ────────────────────────────────────────────────────────────────
 
 PARSERS=$(( NCPU - 2 < 1 ? 1 : NCPU - 2 ))
-FILE_SIZE=$(stat -c%s "$DIR/db.pgn.zst" 2>/dev/null || echo 0)
+FILE_SIZE=$(stat -c%s "$PGN_FILE" 2>/dev/null || echo 0)
 TARGET_GAMES=$(( FILE_SIZE / 322 ))
 
 # Always clear checkpoint when DB is empty — it may be baked into a VM snapshot
@@ -218,7 +225,7 @@ echo ""
 
 # ── Launch importer in background ────────────────────────────────────────────
 IMPORTER_ARGS=(
-    --file    "$DIR/db.pgn.zst"
+    --file    "$PGN_FILE"
     --dsn     "$DSN"
     --parsers "$PARSERS"
     --batch   "$BATCH"
