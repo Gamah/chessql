@@ -79,7 +79,10 @@ sudo apt-get install -y \
     libpq-dev libzstd-dev \
     build-essential g++
 
-# ── 2. Compile C++ importer ──────────────────────────────────────────────────
+# ── 2. Pull latest + compile C++ importer ────────────────────────────────────
+
+log "Pulling latest from $(git -C "$DIR" branch --show-current)"
+git -C "$DIR" pull --ff-only
 
 log "Compiling lichess_import"
 cd "$DIR"
