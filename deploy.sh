@@ -77,6 +77,140 @@ pg_wait() {
     done
 }
 
+# ── Index-build helpers ───────────────────────────────────────────────────────
+
+# Check if an index exists and is valid.
+# Drops INVALID indexes (left by interrupted CONCURRENTLY builds) so they
+# can be retried cleanly.
+# Returns 0 = needs building, 1 = already done.
+_idx_check() {
+    local name="$1"
+    local row
+    row=$(psql "$DSN" -At -c "
+        SELECT indisvalid FROM pg_index
+        JOIN pg_class ON pg_class.oid = pg_index.indexrelid
+        WHERE pg_class.relname = '$name'" 2>/dev/null || echo "")
+    if [[ "$row" == "t" ]]; then
+        printf "  ✓ %-50s already exists\n" "$name"; return 1
+    elif [[ "$row" == "f" ]]; then
+        printf "  ⚠ %-50s INVALID — dropping and retrying...\n" "$name"
+        psql "$DSN" -c "DROP INDEX CONCURRENTLY $name" >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
+# Build one index with a live progress bar.
+# Usage: build_index INDEX_NAME "CREATE INDEX CONCURRENTLY ... "
+build_index() {
+    local name="$1" sql="$2"
+    _idx_check "$name" || return 0
+
+    # Launch the build in a background psql process
+    psql "$DSN" -c "$sql" >/dev/null 2>&1 &
+    local pid=$! start=$SECONDS stuck_at=0
+
+    printf "  ◌ %-50s " "$name"
+    while kill -0 "$pid" 2>/dev/null; do
+        local row phase blks_done blks_total
+        row=$(psql "$DSN" -At -c "
+            SELECT phase, blocks_done, blocks_total
+            FROM pg_stat_progress_create_index LIMIT 1" 2>/dev/null || echo "||")
+        IFS='|' read -r phase blks_done blks_total <<< "$row"
+        phase="${phase:-initializing}"
+        blks_done="${blks_done:-0}"
+        blks_total="${blks_total:-0}"
+
+        local pct=0 bar="" filled
+        [[ ${blks_total:-0} -gt 0 ]] && pct=$(( blks_done * 100 / blks_total ))
+        filled=$(( pct / 5 ))
+        for (( i=0; i<20; i++ )); do [[ $i -lt $filled ]] && bar+="█" || bar+="░"; done
+
+        local elapsed=$(( SECONDS - start ))
+        printf "\r  ◌ %-50s [%s] %3d%%  %-30s %ds\033[K" \
+            "$name" "$bar" "$pct" "$phase" "$elapsed"
+
+        # Detect hangs: if stuck in a waiting phase for >60s, show blockers
+        # and auto-terminate any idle-in-transaction connections.
+        if [[ "$phase" == *"wait"* ]]; then
+            [[ $stuck_at -eq 0 ]] && stuck_at=$SECONDS
+            if (( SECONDS - stuck_at > 60 )); then
+                printf "\n    ⚠ stuck in '%s' for %ds — checking blockers...\n" \
+                    "$phase" "$(( SECONDS - stuck_at ))"
+                psql "$DSN" -c "
+                    SELECT pid, state, wait_event,
+                           now() - state_change AS age,
+                           left(query, 60) AS query
+                    FROM pg_stat_activity
+                    WHERE datname = '${DB_NAME}' AND state <> 'idle'
+                    ORDER BY state_change" 2>/dev/null || true
+                echo "    Terminating idle-in-transaction connections..."
+                pg_admin -d "$DB_NAME" -c "
+                    SELECT count(pg_terminate_backend(pid)) AS terminated
+                    FROM pg_stat_activity
+                    WHERE datname = '${DB_NAME}'
+                      AND state = 'idle in transaction'" 2>/dev/null || true
+                stuck_at=$SECONDS  # reset to avoid spamming
+                printf "  ◌ %-50s " "$name"
+            fi
+        else
+            stuck_at=0
+        fi
+
+        sleep 2
+    done
+
+    wait "$pid"; local rc=$? elapsed=$(( SECONDS - start ))
+    if [[ $rc -eq 0 ]]; then
+        printf "\r  ✓ %-50s [████████████████████] done\033[K  %ds\n" "$name" "$elapsed"
+    else
+        printf "\r  ✗ %-50s FAILED (exit %d)\033[K\n" "$name" "$rc"
+        die "Index build failed: $name"
+    fi
+}
+
+# Cluster a table with a live progress bar.
+# Skips if the table is already clustered on the given index (idempotent).
+_cluster_monitored() {
+    local tbl="$1" idx="$2"
+
+    local is_clustered
+    is_clustered=$(psql "$DSN" -At -c "
+        SELECT indisclustered FROM pg_index
+        JOIN pg_class i ON i.oid = pg_index.indexrelid
+        JOIN pg_class t ON t.oid = pg_index.indrelid
+        WHERE t.relname = '$tbl' AND i.relname = '$idx'" 2>/dev/null || echo "f")
+    if [[ "$is_clustered" == "t" ]]; then
+        printf "  ✓ CLUSTER %-42s already clustered\n" "$tbl"; return 0
+    fi
+
+    printf "  ◌ CLUSTER %-42s " "$tbl"
+    psql "$DSN" -c "CLUSTER $tbl USING $idx" >/dev/null 2>&1 &
+    local pid=$! start=$SECONDS
+    while kill -0 "$pid" 2>/dev/null; do
+        local row phase blks_done blks_total
+        row=$(psql "$DSN" -At -c "
+            SELECT phase, heap_blks_scanned, heap_blks_total
+            FROM pg_stat_progress_cluster
+            WHERE relid = '$tbl'::regclass LIMIT 1" 2>/dev/null || echo "||")
+        IFS='|' read -r phase blks_done blks_total <<< "$row"
+        phase="${phase:-working}"; blks_done="${blks_done:-0}"; blks_total="${blks_total:-0}"
+        local pct=0 bar="" filled
+        [[ ${blks_total:-0} -gt 0 ]] && pct=$(( blks_done * 100 / blks_total ))
+        filled=$(( pct / 5 ))
+        for (( i=0; i<20; i++ )); do [[ $i -lt $filled ]] && bar+="█" || bar+="░"; done
+        printf "\r  ◌ CLUSTER %-42s [%s] %3d%%  %-18s %ds\033[K" \
+            "$tbl" "$bar" "$pct" "$phase" "$(( SECONDS - start ))"
+        sleep 5
+    done
+    wait "$pid"; local rc=$? elapsed=$(( SECONDS - start ))
+    if [[ $rc -eq 0 ]]; then
+        printf "\r  ✓ CLUSTER %-42s done\033[K  %ds\n" "$tbl" "$elapsed"
+    else
+        printf "\r  ✗ CLUSTER %-42s FAILED\033[K\n" "$tbl"
+        die "CLUSTER failed on $tbl"
+    fi
+}
+
 # ── 1. System packages ───────────────────────────────────────────────────────
 
 log "Installing system packages"
@@ -303,12 +437,89 @@ fi
 rm -f "$CKPT"
 echo "  Import complete."
 
-# ── 7. Post-load: indexes + constraints ──────────────────────────────────────
-# Idempotent: all statements use IF NOT EXISTS or CONCURRENTLY (which is a no-op
-# if the index already exists). Safe to re-run after a partial failure.
+# ── 7. Post-load ──────────────────────────────────────────────────────────────
 
-log "Running post_load.sql (index builds — may take 30-60 min)"
-pg_run -f "$DIR/post_load.sql"
+log "Post-load: make durable + constraints"
+pg_run << 'SQL'
+ALTER TABLE games      SET LOGGED;
+ALTER TABLE game_moves SET LOGGED;
+ALTER TABLE game_tags  SET LOGGED;
+
+ALTER TABLE games      RESET (autovacuum_enabled);
+ALTER TABLE game_moves RESET (autovacuum_enabled);
+ALTER TABLE game_tags  RESET (autovacuum_enabled);
+
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_white_id_fk
+    FOREIGN KEY (white_id) REFERENCES players(id) NOT VALID;
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_black_id_fk
+    FOREIGN KEY (black_id) REFERENCES players(id) NOT VALID;
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_tc_fk
+    FOREIGN KEY (time_control_id) REFERENCES time_controls(id) NOT VALID;
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_opening_fk
+    FOREIGN KEY (opening_id) REFERENCES openings(id) NOT VALID;
+ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_game_fk
+    FOREIGN KEY (game_id) REFERENCES games(id) NOT VALID;
+ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_move_fk
+    FOREIGN KEY (move_id) REFERENCES moves(id) NOT VALID;
+ALTER TABLE game_tags ADD CONSTRAINT IF NOT EXISTS game_tags_game_fk
+    FOREIGN KEY (game_id) REFERENCES games(id) NOT VALID;
+
+ALTER TABLE games VALIDATE CONSTRAINT games_white_id_fk;
+ALTER TABLE games VALIDATE CONSTRAINT games_black_id_fk;
+
+ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_pk
+    PRIMARY KEY (game_id, ply);
+SQL
+
+log "Clearing idle-in-transaction connections before index builds"
+pg_admin << SQL
+SELECT count(pg_terminate_backend(pid)) AS terminated
+FROM pg_stat_activity
+WHERE datname = '${DB_NAME}' AND state = 'idle in transaction';
+SQL
+
+log "Building indexes (CONCURRENTLY — no table lock, safe to retry)"
+echo "  Progress polls every 2s. Stuck builds auto-kill blockers after 60s."
+echo ""
+
+# games — player lookups
+build_index games_white_id_idx    "CREATE INDEX CONCURRENTLY games_white_id_idx   ON games(white_id)"
+build_index games_black_id_idx    "CREATE INDEX CONCURRENTLY games_black_id_idx   ON games(black_id)"
+# games — date range (BRIN = tiny index, ideal for append-ordered data)
+build_index games_utc_date_brin   "CREATE INDEX CONCURRENTLY games_utc_date_brin  ON games USING BRIN (utc_date)"
+# games — player+date covering indexes
+build_index games_white_date_idx  "CREATE INDEX CONCURRENTLY games_white_date_idx ON games(white_id, utc_date)"
+build_index games_black_date_idx  "CREATE INDEX CONCURRENTLY games_black_date_idx ON games(black_id, utc_date)"
+# games — misc filters
+build_index games_result_idx      "CREATE INDEX CONCURRENTLY games_result_idx     ON games(result)"
+build_index games_tc_id_idx       "CREATE INDEX CONCURRENTLY games_tc_id_idx      ON games(time_control_id)"
+build_index games_opening_id_idx  "CREATE INDEX CONCURRENTLY games_opening_id_idx ON games(opening_id)"
+build_index games_white_elo_idx   "CREATE INDEX CONCURRENTLY games_white_elo_idx  ON games(white_elo)"
+build_index games_black_elo_idx   "CREATE INDEX CONCURRENTLY games_black_elo_idx  ON games(black_elo)"
+# game_moves — move/position lookups
+build_index game_moves_move_id_idx        "CREATE INDEX CONCURRENTLY game_moves_move_id_idx        ON game_moves(move_id)"
+build_index game_moves_pos_hash_idx       "CREATE INDEX CONCURRENTLY game_moves_pos_hash_idx       ON game_moves(position_hash)"
+build_index game_moves_pos_move_idx       "CREATE INDEX CONCURRENTLY game_moves_pos_move_idx       ON game_moves(position_hash, move_id)"
+build_index game_moves_move_pos_idx       "CREATE INDEX CONCURRENTLY game_moves_move_pos_idx       ON game_moves(move_id, position_hash)"
+# game_moves — piece/material filters
+build_index game_moves_piece_moved_idx    "CREATE INDEX CONCURRENTLY game_moves_piece_moved_idx    ON game_moves(piece_moved)"
+build_index game_moves_material_idx       "CREATE INDEX CONCURRENTLY game_moves_material_idx       ON game_moves(material)"
+build_index game_moves_piece_material_idx "CREATE INDEX CONCURRENTLY game_moves_piece_material_idx ON game_moves(piece_moved, material)"
+
+echo ""
+log "Clustering games by player+date (rewrites table — 20-40 min on large datasets)"
+_cluster_monitored games games_white_date_idx
+
+log "Updating planner statistics"
+pg_run << 'SQL'
+ANALYZE players;
+ANALYZE openings;
+ANALYZE time_controls;
+ANALYZE moves;
+ANALYZE games;
+ANALYZE game_moves;
+ANALYZE game_tags;
+SQL
 
 # ── 8. Restore safe Postgres settings ────────────────────────────────────────
 

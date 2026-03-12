@@ -22,27 +22,28 @@ ALTER TABLE game_tags  RESET (autovacuum_enabled);
 -- ── 3. Constraints ──────────────────────────────────────────
 -- games_lichess_id_uq already exists (defined in schema).
 -- NOT VALID: adds FK without scanning existing rows (instant).
+-- IF NOT EXISTS: safe to re-run after a partial failure.
 -- VALIDATE below checks existing rows without holding a lock.
-ALTER TABLE games ADD CONSTRAINT games_white_id_fk
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_white_id_fk
     FOREIGN KEY (white_id) REFERENCES players(id) NOT VALID;
-ALTER TABLE games ADD CONSTRAINT games_black_id_fk
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_black_id_fk
     FOREIGN KEY (black_id) REFERENCES players(id) NOT VALID;
-ALTER TABLE games ADD CONSTRAINT games_tc_fk
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_tc_fk
     FOREIGN KEY (time_control_id) REFERENCES time_controls(id) NOT VALID;
-ALTER TABLE games ADD CONSTRAINT games_opening_fk
+ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_opening_fk
     FOREIGN KEY (opening_id) REFERENCES openings(id) NOT VALID;
-ALTER TABLE game_moves ADD CONSTRAINT game_moves_game_fk
+ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_game_fk
     FOREIGN KEY (game_id) REFERENCES games(id) NOT VALID;
-ALTER TABLE game_moves ADD CONSTRAINT game_moves_move_fk
+ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_move_fk
     FOREIGN KEY (move_id) REFERENCES moves(id) NOT VALID;
-ALTER TABLE game_tags ADD CONSTRAINT game_tags_game_fk
+ALTER TABLE game_tags ADD CONSTRAINT IF NOT EXISTS game_tags_game_fk
     FOREIGN KEY (game_id) REFERENCES games(id) NOT VALID;
 
 ALTER TABLE games VALIDATE CONSTRAINT games_white_id_fk;
 ALTER TABLE games VALIDATE CONSTRAINT games_black_id_fk;
 
 -- ── 5. Primary key on game_moves ─────────────────────────────
-ALTER TABLE game_moves ADD CONSTRAINT game_moves_pk
+ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_pk
     PRIMARY KEY (game_id, ply);
 
 -- ── 6. Indexes (CONCURRENTLY = no table lock) ────────────────
