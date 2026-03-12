@@ -460,26 +460,22 @@ ALTER TABLE games      RESET (autovacuum_enabled);
 ALTER TABLE game_moves RESET (autovacuum_enabled);
 ALTER TABLE game_tags  RESET (autovacuum_enabled);
 
-ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_white_id_fk
-    FOREIGN KEY (white_id) REFERENCES players(id) NOT VALID;
-ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_black_id_fk
-    FOREIGN KEY (black_id) REFERENCES players(id) NOT VALID;
-ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_tc_fk
-    FOREIGN KEY (time_control_id) REFERENCES time_controls(id) NOT VALID;
-ALTER TABLE games ADD CONSTRAINT IF NOT EXISTS games_opening_fk
-    FOREIGN KEY (opening_id) REFERENCES openings(id) NOT VALID;
-ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_game_fk
-    FOREIGN KEY (game_id) REFERENCES games(id) NOT VALID;
-ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_move_fk
-    FOREIGN KEY (move_id) REFERENCES moves(id) NOT VALID;
-ALTER TABLE game_tags ADD CONSTRAINT IF NOT EXISTS game_tags_game_fk
-    FOREIGN KEY (game_id) REFERENCES games(id) NOT VALID;
+DO $$ BEGIN
+  BEGIN ALTER TABLE games ADD CONSTRAINT games_white_id_fk      FOREIGN KEY (white_id)          REFERENCES players(id)       NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+  BEGIN ALTER TABLE games ADD CONSTRAINT games_black_id_fk      FOREIGN KEY (black_id)          REFERENCES players(id)       NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+  BEGIN ALTER TABLE games ADD CONSTRAINT games_tc_fk            FOREIGN KEY (time_control_id)   REFERENCES time_controls(id) NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+  BEGIN ALTER TABLE games ADD CONSTRAINT games_opening_fk       FOREIGN KEY (opening_id)        REFERENCES openings(id)      NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+  BEGIN ALTER TABLE game_moves ADD CONSTRAINT game_moves_game_fk FOREIGN KEY (game_id)          REFERENCES games(id)         NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+  BEGIN ALTER TABLE game_moves ADD CONSTRAINT game_moves_move_fk FOREIGN KEY (move_id)          REFERENCES moves(id)         NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+  BEGIN ALTER TABLE game_tags  ADD CONSTRAINT game_tags_game_fk  FOREIGN KEY (game_id)          REFERENCES games(id)         NOT VALID; EXCEPTION WHEN duplicate_object THEN NULL; END;
+END $$;
 
 ALTER TABLE games VALIDATE CONSTRAINT games_white_id_fk;
 ALTER TABLE games VALIDATE CONSTRAINT games_black_id_fk;
 
-ALTER TABLE game_moves ADD CONSTRAINT IF NOT EXISTS game_moves_pk
-    PRIMARY KEY (game_id, ply);
+DO $$ BEGIN
+  BEGIN ALTER TABLE game_moves ADD CONSTRAINT game_moves_pk PRIMARY KEY (game_id, ply); EXCEPTION WHEN duplicate_object OR invalid_table_definition THEN NULL; END;
+END $$;
 SQL
 
 log "Clearing idle-in-transaction connections before index builds"
