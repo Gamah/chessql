@@ -24,10 +24,29 @@
 
 set -euo pipefail
 
+# ── Debug mode ────────────────────────────────────────────────────────────────
+# Usage:  ./deploy.sh --debug [N]
+#   Imports only the first N games (default 1,000,000) then stops.
+#   Skips the slow post-load index build so you get a fast schema/pipeline check.
+#   Uses a separate database (lichess_debug) so it never pollutes a real import.
+#   Re-drops and recreates the debug DB on each run for a clean slate.
+#
+DEBUG=0
+DEBUG_LIMIT=1000000
+if [[ "${1:-}" == "--debug" ]]; then
+    DEBUG=1
+    [[ -n "${2:-}" && "${2}" =~ ^[0-9]+$ ]] && DEBUG_LIMIT="$2"
+    echo "━━━  DEBUG MODE — first ${DEBUG_LIMIT} games only  ━━━"
+fi
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
-DB_NAME="lichess"
 DB_USER="lichess"
 DB_PASS="lichess"
+if [[ $DEBUG -eq 1 ]]; then
+    DB_NAME="lichess_debug"
+else
+    DB_NAME="lichess"
+fi
 DSN="postgresql://${DB_USER}:${DB_PASS}@localhost/${DB_NAME}"
 IMPORTER="$DIR/lichess_import"
 IMPORT_LOG="$DIR/import.log"
@@ -82,10 +101,21 @@ BEGIN
   END IF;
 END
 \$\$;
+SQL
+
+if [[ $DEBUG -eq 1 ]]; then
+    # Drop and recreate debug DB every run for a clean slate
+    pg_admin << SQL
+DROP DATABASE IF EXISTS ${DB_NAME};
+CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};
+SQL
+else
+    pg_admin << SQL
 SELECT 'CREATE DATABASE ${DB_NAME} OWNER ${DB_USER}'
  WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '${DB_NAME}')
 \gexec
 SQL
+fi
 
 # ── 4. Tune Postgres for bulk import ─────────────────────────────────────────
 #
@@ -184,13 +214,18 @@ echo "  Log            : $IMPORT_LOG"
 echo ""
 
 # ── Launch importer in background ────────────────────────────────────────────
-"$IMPORTER" \
-    --file    "$DIR/db.pgn.zst" \
-    --dsn     "$DSN" \
-    --parsers "$PARSERS" \
-    --batch   "$BATCH" \
-    --target  "$TARGET_GAMES" \
-    >> "$IMPORT_LOG" 2>&1 &
+IMPORTER_ARGS=(
+    --file    "$DIR/db.pgn.zst"
+    --dsn     "$DSN"
+    --parsers "$PARSERS"
+    --batch   "$BATCH"
+    --target  "$TARGET_GAMES"
+)
+if [[ $DEBUG -eq 1 ]]; then
+    IMPORTER_ARGS+=(--limit "$DEBUG_LIMIT" --no-resume)
+fi
+
+"$IMPORTER" "${IMPORTER_ARGS[@]}" >> "$IMPORT_LOG" 2>&1 &
 IMPORT_PID=$!
 echo "  Importer PID: $IMPORT_PID"
 echo ""
@@ -258,8 +293,12 @@ echo "  Import complete."
 # Idempotent: all statements use IF NOT EXISTS or CONCURRENTLY (which is a no-op
 # if the index already exists). Safe to re-run after a partial failure.
 
-log "Running post_load.sql (index builds — may take 30-60 min)"
-pg_run -f "$DIR/post_load.sql"
+if [[ $DEBUG -eq 1 ]]; then
+    log "DEBUG MODE — skipping post_load.sql index builds"
+else
+    log "Running post_load.sql (index builds — may take 30-60 min)"
+    pg_run -f "$DIR/post_load.sql"
+fi
 
 # ── 8. Restore safe Postgres settings ────────────────────────────────────────
 

@@ -556,6 +556,7 @@ static void parser_worker(BoundedQueue<std::string>& raw_q,
 // ── Writer thread ─────────────────────────────────────────────────────────────
 static void writer_thread(const std::string& dsn,
                           int batch_size,
+                          long long limit,
                           BoundedQueue<GameRow>& parsed_q,
                           std::atomic<long long>& games_written,
                           std::atomic<long long>& moves_written) {
@@ -773,6 +774,12 @@ static void writer_thread(const std::string& dsn,
             write_checkpoint(valid_games.back()->lichess_id, total);
         }
 
+        // Stop early if a game limit was requested
+        if (limit > 0 && total >= limit) {
+            std::cerr << "\nLimit of " << limit << " games reached — stopping.\n";
+            g_stop.store(true);
+        }
+
         batch.clear();
     }; // end flush lambda
 
@@ -875,6 +882,7 @@ struct Args {
     bool verify  = false;
     int  verify_n = 1000;
     long long target = 0; // estimated total games (for progress bar)
+    long long limit  = 0; // stop after N games written (0 = no limit)
 };
 
 static Args parse_args(int argc, char** argv) {
@@ -889,6 +897,7 @@ static Args parse_args(int argc, char** argv) {
         else if (arg=="--no-resume")           a.resume   = false;
         else if (arg=="--verify")              a.verify   = true;
         else if (arg=="--verify-n" && i+1<argc) a.verify_n = std::stoi(argv[++i]);
+        else if (arg=="--limit"    && i+1<argc) a.limit    = std::stoll(argv[++i]);
     }
     return a;
 }
@@ -935,7 +944,7 @@ int main(int argc, char** argv) {
 
     if (args.file.empty() || args.dsn.empty()) {
         std::cerr << "Usage: lichess_import --file db.pgn.zst --dsn <dsn> "
-                     "[--parsers N] [--batch N] [--target N] [--no-resume] [--verify]\n";
+                     "[--parsers N] [--batch N] [--target N] [--limit N] [--no-resume] [--verify]\n";
         return 1;
     }
 
@@ -1010,7 +1019,7 @@ int main(int argc, char** argv) {
     }
 
     std::thread writer([&]{
-        writer_thread(args.dsn, args.batch, parsed_q, games_written, moves_written);
+        writer_thread(args.dsn, args.batch, args.limit, parsed_q, games_written, moves_written);
     });
 
     std::thread progress([&]{
