@@ -80,6 +80,18 @@ CREATE INDEX CONCURRENTLY game_moves_pos_move_idx ON game_moves(position_hash, m
 -- game_moves: inverse — "all positions where this move appeared"
 CREATE INDEX CONCURRENTLY game_moves_move_pos_idx ON game_moves(move_id, position_hash);
 
+-- game_moves: piece-type filter ("all queen moves", "all pawn moves", etc.)
+CREATE INDEX CONCURRENTLY game_moves_piece_moved_idx ON game_moves(piece_moved);
+
+-- game_moves: material filter — supports bitwise range queries on endgame/middlegame positions.
+-- A plain btree index works well here; the packed nibble layout means similar material
+-- signatures cluster numerically, so range scans (e.g. material & mask = value) benefit.
+CREATE INDEX CONCURRENTLY game_moves_material_idx ON game_moves(material);
+
+-- game_moves: combined — piece moved within a specific material context, e.g.
+-- "all rook moves in rook-vs-rook endings": piece_moved='R' AND material=<packed value>
+CREATE INDEX CONCURRENTLY game_moves_piece_material_idx ON game_moves(piece_moved, material);
+
 -- ── 7. Cluster games by player+date ──────────────────────────
 -- Physically rewrites the table so "all games by player" scans
 -- hit contiguous disk pages instead of random I/O.
