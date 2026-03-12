@@ -557,6 +557,7 @@ static void parser_worker(BoundedQueue<std::string>& raw_q,
 static void writer_thread(const std::string& dsn,
                           int batch_size,
                           long long limit,
+                          BoundedQueue<std::string>& raw_q,
                           BoundedQueue<GameRow>& parsed_q,
                           std::atomic<long long>& games_written,
                           std::atomic<long long>& moves_written) {
@@ -778,6 +779,8 @@ static void writer_thread(const std::string& dsn,
         if (limit > 0 && total >= limit) {
             std::cerr << "\nLimit of " << limit << " games reached — stopping.\n";
             g_stop.store(true);
+            raw_q.wake_all();
+            parsed_q.wake_all();
         }
 
         batch.clear();
@@ -1019,7 +1022,7 @@ int main(int argc, char** argv) {
     }
 
     std::thread writer([&]{
-        writer_thread(args.dsn, args.batch, args.limit, parsed_q, games_written, moves_written);
+        writer_thread(args.dsn, args.batch, args.limit, raw_q, parsed_q, games_written, moves_written);
     });
 
     std::thread progress([&]{
