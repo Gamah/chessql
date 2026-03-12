@@ -33,14 +33,14 @@ shift
 
 # ── Debug mode ────────────────────────────────────────────────────────────────
 # Usage:  ./deploy.sh <file.pgn.zst> --debug [N]
-#   Imports only the first N games (default 1,000,000) then stops.
+#   Imports only the first N games (default 100,000) then stops.
 #   Runs the full post-load pipeline including all index builds — use this to
 #   validate the complete deploy on a small dataset before a full import.
 #   Uses a separate database (lichess_debug) so it never pollutes a real import.
 #   Re-drops and recreates the debug DB on each run for a clean slate.
 #
 DEBUG=0
-DEBUG_LIMIT=1000000
+DEBUG_LIMIT=100000
 if [[ "${1:-}" == "--debug" ]]; then
     DEBUG=1
     [[ -n "${2:-}" && "${2}" =~ ^[0-9]+$ ]] && DEBUG_LIMIT="$2"
