@@ -82,11 +82,23 @@ CREATE INDEX CONCURRENTLY game_moves_move_pos_idx ON game_moves(move_id, positio
 
 -- game_moves: check/checkmate filtering
 -- mate IS NOT NULL → any check event; mate = TRUE → checkmate only
-CREATE INDEX CONCURRENTLY game_moves_mate_idx     ON game_moves(game_id, ply) WHERE mate IS NOT NULL;
-CREATE INDEX CONCURRENTLY game_moves_checkmate_idx ON game_moves(game_id)     WHERE mate = TRUE;
+CREATE INDEX CONCURRENTLY game_moves_mate_idx          ON game_moves(game_id, ply)        WHERE mate IS NOT NULL;
+CREATE INDEX CONCURRENTLY game_moves_checkmate_idx     ON game_moves(game_id)             WHERE mate = TRUE;
+
+-- game_moves: piece-type on checkmates (ladder mate, smothered mate, etc.)
+-- Narrows the ~0.5% checkmate rows further without touching the full table.
+CREATE INDEX CONCURRENTLY game_moves_checkmate_piece_idx ON game_moves(moving_piece, game_id) WHERE mate = TRUE;
+
+-- game_moves: capture analysis ("all knight captures", "exchange sacrifice detection")
+CREATE INDEX CONCURRENTLY game_moves_capture_idx ON game_moves(capture_piece, game_id) WHERE capture_piece IS NOT NULL;
 
 -- games: variant filter (nearly all pattern queries will add WHERE variant = 'standard')
 CREATE INDEX CONCURRENTLY games_variant_idx ON games(variant);
+
+-- games: misc filters commonly combined with player/date/variant
+CREATE INDEX CONCURRENTLY games_speed_idx       ON games(speed);
+CREATE INDEX CONCURRENTLY games_termination_idx ON games(termination);
+CREATE INDEX CONCURRENTLY games_ply_count_idx   ON games(ply_count);
 
 -- ── 7. Cluster games by player+date ──────────────────────────
 -- Physically rewrites the table so "all games by player" scans
