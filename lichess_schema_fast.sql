@@ -95,7 +95,9 @@ CREATE UNLOGGED TABLE IF NOT EXISTS game_moves (
     moving_piece    CHAR(1)  NOT NULL,
     capture_piece   CHAR(1),
     mate            BOOL,
-    material        BIGINT   NOT NULL
+    material        BIGINT   NOT NULL,
+    wk_sq           SMALLINT NOT NULL,  -- white king square after move (rank*8+file, a1=0)
+    bk_sq           SMALLINT NOT NULL   -- black king square after move
 ) WITH (autovacuum_enabled = false);
 
 CREATE UNLOGGED TABLE IF NOT EXISTS game_tags (

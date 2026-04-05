@@ -89,6 +89,14 @@ CREATE INDEX CONCURRENTLY game_moves_checkmate_idx     ON game_moves(game_id)   
 -- Narrows the ~0.5% checkmate rows further without touching the full table.
 CREATE INDEX CONCURRENTLY game_moves_checkmate_piece_idx ON game_moves(moving_piece, game_id) WHERE mate = TRUE;
 
+-- game_moves: king-on-edge checkmates (ladder mate, lawnmower, corridor)
+-- Covers the ~10% of checkmates where either king is on the edge.
+CREATE INDEX CONCURRENTLY game_moves_checkmate_edge_idx
+    ON game_moves(moving_piece, game_id)
+    WHERE mate = TRUE
+      AND (wk_sq % 8 IN (0,7) OR wk_sq / 8 IN (0,7)
+        OR bk_sq % 8 IN (0,7) OR bk_sq / 8 IN (0,7));
+
 -- game_moves: capture analysis ("all knight captures", "exchange sacrifice detection")
 CREATE INDEX CONCURRENTLY game_moves_capture_idx ON game_moves(capture_piece, game_id) WHERE capture_piece IS NOT NULL;
 

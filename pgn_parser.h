@@ -19,6 +19,8 @@ struct MoveRow {
     std::optional<char> capture_piece;  // FEN char, nullopt if no capture
     std::optional<bool> mate;           // nullopt=no check, false=check, true=checkmate
     int64_t             material;       // packed piece counts after move (see pieces() SQL fn)
+    int8_t              wk_sq;          // white king square after move (0-63, rank*8+file)
+    int8_t              bk_sq;          // black king square after move (0-63, rank*8+file)
 };
 
 struct GameRow {
@@ -301,12 +303,14 @@ inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) 
 
         if (!board.apply_uci(uci)) { g.parse_error = true; break; }
 
-        // Material is computed from the post-move board so the last row reflects
-        // the final position (the one that matters for checkmate pattern queries).
+        // Material and king squares are computed from the post-move board so the
+        // last row reflects the final position (matters for checkmate pattern queries).
         int64_t mat = compute_material(board);
+        int8_t  wk  = (int8_t)board.king_sq(true);
+        int8_t  bk  = (int8_t)board.king_sq(false);
 
         g.moves.push_back({ply, uci, hash_before, clock, eval_cp, eval_mate,
-                           moving_ch, cap_char, tc.mate, mat});
+                           moving_ch, cap_char, tc.mate, mat, wk, bk});
     }
 
     g.ply_count = (int)g.moves.size();

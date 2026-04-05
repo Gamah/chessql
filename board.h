@@ -78,6 +78,13 @@ struct Board {
         return h;
     }
 
+    int king_sq(bool white) const {
+        Piece k = white ? wK : bK;
+        for (int s = 0; s < 64; s++)
+            if (sq[s] == k) return s;
+        return -1;
+    }
+
     int64_t zobrist_i64() const {
         uint64_t u = zobrist_u64();
         int64_t  s2;
