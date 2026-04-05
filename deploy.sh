@@ -13,6 +13,10 @@
 # Run as a non-root user with sudo:
 #   chmod +x deploy.sh && ./deploy.sh
 #
+# Override the PostgreSQL data directory (recommended when the OS
+# disk is small — point this at a large dedicated volume):
+#   PGDATA_DIR=/chessql/postgresql ./deploy.sh
+#
 # Re-runnable: safe to run again after a crash.
 #   - Packages: apt is idempotent
 #   - Binary: make only rebuilds if sources changed
@@ -34,6 +38,11 @@ IMPORT_LOG="$DIR/import.log"
 CKPT="$HOME/.lichess_import_ckpt"
 
 BATCH=50000
+
+# PostgreSQL data directory.
+# Default: wherever apt puts it (/var/lib/postgresql).
+# Override with PGDATA_DIR=/chessql/postgresql ./deploy.sh
+PGDATA_DIR="${PGDATA_DIR:-}"
 
 log()  { echo; echo "━━━  $*  ━━━"; }
 die()  { echo "✗ FATAL: $*" >&2; exit 1; }
@@ -68,11 +77,52 @@ make -j"$(nproc)"
 cd - > /dev/null
 echo "  Built: $IMPORTER"
 
-# ── 3. Start Postgres + create role/database ─────────────────────────────────
+# ── 3. Start Postgres + (optionally) relocate data directory ─────────────────
+#
+# Strategy: apt installs and auto-starts PostgreSQL at its default location
+# (/var/lib/postgresql). If PGDATA_DIR is set to something else, we stop the
+# service, move the entire /var/lib/postgresql tree to the new location, and
+# replace it with a symlink. PostgreSQL never knows it moved — no config edits
+# needed, all pg_ctlcluster tooling continues to work normally.
+#
+# This block is skipped on re-runs (symlink already exists).
 
 log "Starting PostgreSQL"
 sudo systemctl enable --now postgresql
 pg_wait
+
+if [[ -n "$PGDATA_DIR" ]]; then
+    DEFAULT_PG=/var/lib/postgresql
+
+    if [[ -L "$DEFAULT_PG" ]]; then
+        echo "  Data directory already relocated to $(readlink "$DEFAULT_PG") — skipping."
+    elif [[ "$PGDATA_DIR" != "$DEFAULT_PG" ]]; then
+        log "Relocating PostgreSQL data directory → $PGDATA_DIR"
+
+        # Validate target: must be on a separate, mounted filesystem
+        TARGET_MOUNT=$(stat -c %m "$PGDATA_DIR" 2>/dev/null || true)
+        DEFAULT_MOUNT=$(stat -c %m "$DEFAULT_PG")
+        if [[ "$TARGET_MOUNT" == "$DEFAULT_MOUNT" ]]; then
+            die "PGDATA_DIR ($PGDATA_DIR) is on the same filesystem as $DEFAULT_PG." \
+                "Mount your dedicated volume first, then re-run."
+        fi
+
+        sudo systemctl stop postgresql
+
+        echo "  Copying $DEFAULT_PG → $PGDATA_DIR (this may take a moment)..."
+        sudo mkdir -p "$(dirname "$PGDATA_DIR")"
+        sudo cp -a "$DEFAULT_PG" "$PGDATA_DIR"
+
+        echo "  Replacing $DEFAULT_PG with symlink..."
+        sudo mv "$DEFAULT_PG" "${DEFAULT_PG}.orig"
+        sudo ln -s "$PGDATA_DIR" "$DEFAULT_PG"
+
+        sudo systemctl start postgresql
+        pg_wait
+        echo "  Relocation complete. Symlink: $DEFAULT_PG → $PGDATA_DIR"
+        echo "  Original preserved at ${DEFAULT_PG}.orig (safe to delete after verifying import)"
+    fi
+fi
 
 pg_admin << SQL
 DO \$\$
