@@ -9,12 +9,16 @@
 // ── Data structures ───────────────────────────────────────────────────────────
 
 struct MoveRow {
-    int     ply;
+    int         ply;
     std::string uci;
-    int64_t pos_hash;
-    std::optional<int> clock_secs;
-    std::optional<int> eval_cp;
-    std::optional<int> eval_mate;
+    int64_t     pos_hash;           // Zobrist hash before move
+    std::optional<int>  clock_secs;
+    std::optional<int>  eval_cp;
+    std::optional<int>  eval_mate;
+    char                moving_piece;   // FEN char: 'R','q', etc.
+    std::optional<char> capture_piece;  // FEN char, nullopt if no capture
+    std::optional<bool> mate;           // nullopt=no check, false=check, true=checkmate
+    int64_t             material;       // packed piece counts after move (see pieces() SQL fn)
 };
 
 struct GameRow {
@@ -31,11 +35,15 @@ struct GameRow {
     std::string opening;
     std::string event_type;
     std::string speed;
+    std::string variant;
     std::string movetext;
+    int         ply_count = 0;
     std::vector<MoveRow> moves;
     std::unordered_map<std::string,std::string> extra_tags;
     bool parse_error = false;
 };
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
 
 static inline bool is_known_tag(const std::string& k) {
     static const std::unordered_map<std::string,bool> known = {
@@ -98,6 +106,59 @@ static inline std::string extract_speed(const std::string& event) {
     return "";
 }
 
+static inline std::string extract_variant(const std::string& event) {
+    std::string low = event;
+    for (auto& c : low) c = (char)tolower((unsigned char)c);
+    if (low.find("chess960")     != std::string::npos) return "chess960";
+    if (low.find("crazyhouse")   != std::string::npos) return "crazyhouse";
+    if (low.find("antichess")    != std::string::npos) return "antichess";
+    if (low.find("atomic")       != std::string::npos) return "atomic";
+    if (low.find("horde")        != std::string::npos) return "horde";
+    if (low.find("racing kings") != std::string::npos) return "racingkings";
+    if (low.find("king of the hill") != std::string::npos) return "kingofthehill";
+    if (low.find("three-check")  != std::string::npos) return "threecheck";
+    if (low.find("threecheck")   != std::string::npos) return "threecheck";
+    return "standard";
+}
+
+// FEN-style single character for a piece ('R','q', etc.)
+static inline char piece_to_fen(Piece p) {
+    switch (p) {
+        case wP: return 'P'; case wN: return 'N'; case wB: return 'B';
+        case wR: return 'R'; case wQ: return 'Q'; case wK: return 'K';
+        case bP: return 'p'; case bN: return 'n'; case bB: return 'b';
+        case bR: return 'r'; case bQ: return 'q'; case bK: return 'k';
+        default: return '.';
+    }
+}
+
+// Pack piece counts into a BIGINT.
+// Layout (4 bits per piece type, 0-15 per nibble):
+//   bits  0- 3  white pawns       bits  4- 7  black pawns
+//   bits  8-11  white knights     bits 12-15  black knights
+//   bits 16-19  white bishops     bits 20-23  black bishops
+//   bits 24-27  white rooks       bits 28-31  black rooks
+//   bits 32-35  white queens      bits 36-39  black queens
+//   bits 40-63  spare
+// Kings are not counted (always 1 each while the game is valid).
+// Extract with the pieces() SQL function defined in post_load.sql.
+static inline int64_t compute_material(const Board& board) {
+    // Indexed by Piece enum value (0=EMPTY..12=bK)
+    static constexpr int OFFSETS[13] = {-1, 0, 8, 16, 24, 32, -1, 4, 12, 20, 28, 36, -1};
+    uint64_t mat = 0;
+    for (int s = 0; s < 64; s++) {
+        int p = (int)board.sq[s];
+        if (p == 0) continue;
+        int off = OFFSETS[p];
+        if (off < 0) continue; // kings
+        uint64_t cnt = (mat >> off) & 0xFULL;
+        mat = (mat & ~(0xFULL << off)) | ((cnt + 1ULL) << off);
+    }
+    int64_t result;
+    std::memcpy(&result, &mat, sizeof result);
+    return result;
+}
+
 // ── Main parser ───────────────────────────────────────────────────────────────
 
 inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) {
@@ -133,7 +194,11 @@ inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) 
             else if (key=="ECO")              g.eco         = value;
             else if (key=="Opening")          g.opening     = value;
             else if (key=="Termination")      g.termination = value;
-            else if (key=="Event") { g.event_type = value; g.speed = extract_speed(value); }
+            else if (key=="Event") {
+                g.event_type = value;
+                g.speed      = extract_speed(value);
+                g.variant    = extract_variant(value);
+            }
             else if (key=="FEN")  { parse_moves_flag = false; } // non-standard start
             else if (!is_known_tag(key)) g.extra_tags[key] = value;
         } else {
@@ -145,7 +210,9 @@ inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) 
     if (!parse_moves_flag || movetext.empty()) return g;
 
     // ── Phase 2: tokenise movetext ────────────────────────────────────────────
-    struct TC { std::string san; std::string comment; };
+    // TC carries the SAN token, its inline comment, and check/mate status derived
+    // from the trailing '+' or '#' marker before annotation glyphs are stripped.
+    struct TC { std::string san; std::string comment; std::optional<bool> mate; };
     std::vector<TC> tcs;
 
     {
@@ -181,15 +248,21 @@ inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) 
             if (!tok.empty() && std::isdigit((unsigned char)tok[0])) continue;
             // Skip result tokens
             if (tok=="1-0"||tok=="0-1"||tok=="1/2-1/2"||tok=="*") continue;
-            // Strip markers
+
+            // Capture check/mate from trailing markers before stripping.
+            // Order: annotation glyphs (!,?) are outermost, then +/# beneath them.
+            std::optional<bool> move_mate = std::nullopt;
             while (!tok.empty() && (tok.back()=='+'||tok.back()=='#'||
-                                     tok.back()=='!'||tok.back()=='?'))
+                                     tok.back()=='!'||tok.back()=='?')) {
+                if      (tok.back() == '#') move_mate = true;
+                else if (tok.back() == '+') move_mate = false;
                 tok.pop_back();
-            if (!tok.empty()) tcs.push_back({tok, ""});
+            }
+            if (!tok.empty()) tcs.push_back({tok, "", move_mate});
         }
     }
 
-    // ── Phase 3: board walk → UCI + Zobrist ──────────────────────────────────
+    // ── Phase 3: board walk → UCI, Zobrist, piece metadata, material ──────────
     Board board = Board::start_pos();
     int ply = 0;
 
@@ -202,13 +275,40 @@ inline GameRow parse_game(const std::string& raw, bool parse_moves_flag = true) 
 
         if (uci.empty()) { g.parse_error = true; break; }
 
+        // Read board state before applying the move.
+        int   from_sq  = parse_sq(uci[0], uci[1]);
+        int   to_sq    = parse_sq(uci[2], uci[3]);
+        Piece moving   = board.sq[from_sq];
+        char  moving_ch = piece_to_fen(moving);
+
+        // Castling: the king "moves to" the rook's square in Chess960, which
+        // would look like a capture. Detect and exclude.
+        bool is_castle = is_king(moving) && (
+            std::abs(file_of(to_sq) - file_of(from_sq)) >= 2 ||
+            (board.sq[to_sq] == wR &&  board.white_to_move) ||
+            (board.sq[to_sq] == bR && !board.white_to_move)
+        );
+
+        std::optional<char> cap_char = std::nullopt;
+        if (!is_castle) {
+            bool is_ep = is_pawn(moving) && to_sq == board.ep_sq && board.ep_sq >= 0;
+            Piece cap  = is_ep ? (board.white_to_move ? bP : wP) : board.sq[to_sq];
+            if (cap != EMPTY) cap_char = piece_to_fen(cap);
+        }
+
         auto [eval_cp, eval_mate] = extract_eval(tc.comment);
         auto clock = extract_clock(tc.comment);
 
-        g.moves.push_back({ply, uci, hash_before, clock, eval_cp, eval_mate});
-
         if (!board.apply_uci(uci)) { g.parse_error = true; break; }
+
+        // Material is computed from the post-move board so the last row reflects
+        // the final position (the one that matters for checkmate pattern queries).
+        int64_t mat = compute_material(board);
+
+        g.moves.push_back({ply, uci, hash_before, clock, eval_cp, eval_mate,
+                           moving_ch, cap_char, tc.mate, mat});
     }
 
+    g.ply_count = (int)g.moves.size();
     return g;
 }

@@ -80,6 +80,14 @@ CREATE INDEX CONCURRENTLY game_moves_pos_move_idx ON game_moves(position_hash, m
 -- game_moves: inverse — "all positions where this move appeared"
 CREATE INDEX CONCURRENTLY game_moves_move_pos_idx ON game_moves(move_id, position_hash);
 
+-- game_moves: check/checkmate filtering
+-- mate IS NOT NULL → any check event; mate = TRUE → checkmate only
+CREATE INDEX CONCURRENTLY game_moves_mate_idx     ON game_moves(game_id, ply) WHERE mate IS NOT NULL;
+CREATE INDEX CONCURRENTLY game_moves_checkmate_idx ON game_moves(game_id)     WHERE mate = TRUE;
+
+-- games: variant filter (nearly all pattern queries will add WHERE variant = 'standard')
+CREATE INDEX CONCURRENTLY games_variant_idx ON games(variant);
+
 -- ── 7. Cluster games by player+date ──────────────────────────
 -- Physically rewrites the table so "all games by player" scans
 -- hit contiguous disk pages instead of random I/O.
@@ -94,3 +102,45 @@ ANALYZE moves;
 ANALYZE games;
 ANALYZE game_moves;
 ANALYZE game_tags;
+
+-- ── 9. Material decomposition ────────────────────────────────
+-- Breaks the packed material BIGINT into named piece counts.
+-- Each field is the count of that piece type (0-15, kings excluded).
+--
+-- Usage (dot notation — note outer parens required):
+--   SELECT (pieces(material)).wq FROM game_moves;
+--
+-- Usage (LATERAL spread — cleaner for multi-field access):
+--   SELECT p.wq, p.bq
+--   FROM game_moves gm, pieces(gm.material) p
+--   WHERE p.wq + p.bq >= 5;
+
+CREATE TYPE piece_counts AS (
+    wp SMALLINT,   -- white pawns
+    bp SMALLINT,   -- black pawns
+    wn SMALLINT,   -- white knights
+    bn SMALLINT,   -- black knights
+    wb SMALLINT,   -- white bishops
+    bb SMALLINT,   -- black bishops
+    wr SMALLINT,   -- white rooks
+    br SMALLINT,   -- black rooks
+    wq SMALLINT,   -- white queens
+    bq SMALLINT    -- black queens
+);
+
+CREATE OR REPLACE FUNCTION pieces(mat BIGINT)
+RETURNS piece_counts
+LANGUAGE SQL IMMUTABLE STRICT PARALLEL SAFE AS $$
+    SELECT ROW(
+        (mat >>  0) & 15,   -- wp
+        (mat >>  4) & 15,   -- bp
+        (mat >>  8) & 15,   -- wn
+        (mat >> 12) & 15,   -- bn
+        (mat >> 16) & 15,   -- wb
+        (mat >> 20) & 15,   -- bb
+        (mat >> 24) & 15,   -- wr
+        (mat >> 28) & 15,   -- br
+        (mat >> 32) & 15,   -- wq
+        (mat >> 36) & 15    -- bq
+    )::piece_counts
+$$;

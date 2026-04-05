@@ -305,10 +305,12 @@ struct DimResolver {
         for (const auto& u : new_ucis) {
             if (!first) sql += ",";
             first = false;
-            std::string from = u.substr(0,2);
-            std::string to   = u.substr(2,2);
+            // from_sq / to_sq stored as 0-63 integer index: rank*8 + file
+            int from_idx = (u[1]-'1')*8 + (u[0]-'a');
+            int to_idx   = (u[3]-'1')*8 + (u[2]-'a');
             std::string promo = (u.size()==5) ? std::string(1,u[4]) : "";
-            sql += "('" + u + "','" + from + "','" + to + "'," +
+            sql += "('" + u + "'," + std::to_string(from_idx) + "," +
+                   std::to_string(to_idx) + "," +
                    (promo.empty() ? "NULL" : "'" + promo + "'") + ")";
         }
         sql += " ON CONFLICT(uci) DO NOTHING RETURNING uci, id";
@@ -613,7 +615,8 @@ static void writer_thread(const std::string& dsn,
             "INSERT INTO games(lichess_id,white_id,black_id,"
             "white_elo,black_elo,white_rating_diff,black_rating_diff,"
             "result,termination,utc_date,utc_time,"
-            "time_control_id,opening_id,event_type,speed,movetext) VALUES ";
+            "time_control_id,opening_id,event_type,speed,movetext,"
+            "variant,ply_count) VALUES ";
 
         bool first_game = true;
         std::vector<const GameRow*> valid_games;
@@ -663,7 +666,9 @@ static void writer_thread(const std::string& dsn,
             insert_games += sq_opt_i16(op_id) + ",";
             insert_games += sq_str(g.event_type) + ",";
             insert_games += sq_str(g.speed) + ",";
-            insert_games += sq_str(g.movetext);
+            insert_games += sq_str(g.movetext) + ",";
+            insert_games += sq_str(g.variant) + ",";
+            insert_games += (g.ply_count > 0 ? std::to_string(g.ply_count) : "NULL");
             insert_games += ")";
 
             valid_games.push_back(&g);
@@ -727,6 +732,15 @@ static void writer_thread(const std::string& dsn,
                 row += "\t";
                 if (m.eval_mate) row += std::to_string(*m.eval_mate);
                 else row += "\\N";
+                row += "\t";
+                row += std::string(1, m.moving_piece) + "\t";
+                if (m.capture_piece) row += std::string(1, *m.capture_piece);
+                else row += "\\N";
+                row += "\t";
+                if (m.mate.has_value()) row += (*m.mate ? "t" : "f");
+                else row += "\\N";
+                row += "\t";
+                row += std::to_string(m.material);
                 row += "\n";
                 move_rows.push_back(std::move(row));
                 move_count++;
@@ -736,7 +750,8 @@ static void writer_thread(const std::string& dsn,
         if (!move_rows.empty()) {
             copy_rows(conn,
                 "COPY game_moves(game_id,ply,move_id,position_hash,"
-                "clock_secs,eval_cp,eval_mate) FROM STDIN",
+                "clock_secs,eval_cp,eval_mate,"
+                "moving_piece,capture_piece,mate,material) FROM STDIN",
                 move_rows);
         }
 

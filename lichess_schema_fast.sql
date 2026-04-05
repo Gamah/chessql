@@ -36,8 +36,8 @@ CREATE TABLE IF NOT EXISTS time_controls (
 CREATE TABLE IF NOT EXISTS moves (
     id          INT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     uci         VARCHAR(5) NOT NULL,
-    from_sq     CHAR(2)    NOT NULL,
-    to_sq       CHAR(2)    NOT NULL,
+    from_sq     SMALLINT   NOT NULL,   -- 0-63: rank*8 + file (a1=0, h8=63)
+    to_sq       SMALLINT   NOT NULL,
     promotion   CHAR(1),
     CONSTRAINT moves_uci_uq UNIQUE (uci)
 );
@@ -61,11 +61,28 @@ CREATE UNLOGGED TABLE IF NOT EXISTS games (
     opening_id          SMALLINT,
     event_type          TEXT,
     speed               TEXT,
+    variant             TEXT,          -- 'standard','chess960','crazyhouse', etc.
+    ply_count           SMALLINT,      -- total half-moves played
     movetext            TEXT
 ) WITH (autovacuum_enabled = false);
 
 -- position_hash: Zobrist hash of board BEFORE this move (signed BIGINT).
 -- Primary query pattern: WHERE position_hash = X (opening explorer).
+--
+-- moving_piece / capture_piece: FEN-style single character
+--   uppercase = white (P N B R Q K), lowercase = black (p n b r q k)
+--   capture_piece is NULL when no capture occurred.
+--
+-- mate: NULL = move did not give check, FALSE = check, TRUE = checkmate.
+--
+-- material: packed piece counts after the move.
+--   Use the pieces() SQL function to extract individual counts.
+--   Layout (4 bits per nibble):
+--     bits  0- 3  white pawns    bits  4- 7  black pawns
+--     bits  8-11  white knights  bits 12-15  black knights
+--     bits 16-19  white bishops  bits 20-23  black bishops
+--     bits 24-27  white rooks    bits 28-31  black rooks
+--     bits 32-35  white queens   bits 36-39  black queens
 
 CREATE UNLOGGED TABLE IF NOT EXISTS game_moves (
     game_id         BIGINT   NOT NULL,
@@ -74,7 +91,11 @@ CREATE UNLOGGED TABLE IF NOT EXISTS game_moves (
     position_hash   BIGINT   NOT NULL,
     clock_secs      INT,
     eval_cp         SMALLINT,
-    eval_mate       SMALLINT
+    eval_mate       SMALLINT,
+    moving_piece    CHAR(1)  NOT NULL,
+    capture_piece   CHAR(1),
+    mate            BOOL,
+    material        BIGINT   NOT NULL
 ) WITH (autovacuum_enabled = false);
 
 CREATE UNLOGGED TABLE IF NOT EXISTS game_tags (
